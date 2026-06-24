@@ -271,7 +271,6 @@ int handle_login(uid_t uid) {
         initalize_user(user, uid);
     }
     user->sessions++;
-    fprintf(stderr, "before switch\n");
     switch (user->pstate) {
     case PROCESS_STATE_UP:
     case PROCESS_STATE_DISABLED:
