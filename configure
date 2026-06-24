@@ -1,0 +1,17 @@
+#!/bin/bash
+
+S6_SVSCAN="$(which s6-svscan)"
+
+if [ -z "$S6_SVSCAN" ]; then
+    echo "s6-svscan not found"
+    exit 1
+fi
+
+cat << EOT > config.h
+#ifndef CONFIG_H_
+#define CONFIG_H_
+
+#define S6_SVSCAN "$S6_SVSCAN"
+
+#endif // CONFIG_H_
+EOT
