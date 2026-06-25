@@ -1,4 +1,5 @@
 #include <sys/socket.h>
+#include <grp.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -36,6 +37,8 @@ static struct user users[NUMBER_OF_USERS] = {0};
 static struct passwd* pw;
 static const char* user_service_dir = USER_SERVICE_DIR;
 static size_t user_service_dir_len = sizeof(USER_SERVICE_DIR) - 1;
+#define ENV_PATH "/env"
+#define ENV_PATH_LENGTH (sizeof(ENV_PATH) - 1)
 
 void kill_user_process(struct user* user) {
     fprintf(stderr, "Killing user s6-svscan: pid %d\n", user->pid);
@@ -58,14 +61,6 @@ int start_process(struct user* user) {
         return 1;
     }
     if (!pid) {
-        if (setgid(pw->pw_gid) < 0) {
-            fprintf(stderr, "Failed to drop gid\n");
-            exit(1);
-        }
-        if (setuid(pw->pw_uid) < 0) {
-            fprintf(stderr, "Failed to drop uid\n");
-            exit(1);
-        }
         size_t pw_dir_len = strlen(pw->pw_dir);
         //                                 plus 2 for slash and null byte
         size_t len = pw_dir_len + user_service_dir_len + 2;
@@ -73,13 +68,91 @@ int start_process(struct user* user) {
         memcpy(dir, pw->pw_dir, pw_dir_len);
         dir[pw_dir_len] = '/';
         memcpy(&dir[pw_dir_len + 1], user_service_dir, user_service_dir_len + 1);
-        char* argv[] = { S6_SVSCAN, dir, NULL };
-        fprintf(stderr, "pid=%d: ", getpid());
-        for (char** it = argv; *it; it++) {
-            fprintf(stderr, "%s ", *it);
+        // env file
+        size_t env_path_len = len + ENV_PATH_LENGTH;
+        char env_path[env_path_len];
+        memcpy(env_path, dir, len - 1);
+        memcpy(&env_path[len - 1], ENV_PATH, ENV_PATH_LENGTH);
+        env_path[env_path_len - 1] = 0;
+        int fd = open(env_path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            fprintf(stderr, "No user env file: using su -l\n");
+            size_t cmd_len = S6_SVSCAN_LENGTH + 1 + len;
+            char cmd[cmd_len];
+            memcpy(cmd, S6_SVSCAN, S6_SVSCAN_LENGTH);
+            cmd[S6_SVSCAN_LENGTH] = ' ';
+            memcpy(cmd + S6_SVSCAN_LENGTH + 1, dir, len);
+            cmd[cmd_len - 1] = 0;
+            char* argv[] = {
+                SU,
+                "-l",
+                pw->pw_name,
+                "-c",
+                cmd,
+            };
+            execve(SU, argv, env);
         }
-        fprintf(stderr, "\n");
-        execve(S6_SVSCAN, argv, env);
+        else {
+            off_t file_length = lseek(fd, 0, SEEK_END);
+            if (file_length < 0) {
+                fprintf(stderr, "Cannot seek to end of env file: %s", strerror(errno));
+                exit(1);
+            }
+            off_t zero = lseek(fd, 0, SEEK_SET);
+            if (zero != 0) {
+                fprintf(stderr, "Cannot seek back to begining of env file: %s\n", strerror(errno));
+            }
+
+            char env_file[file_length + 1];
+            ssize_t bytes_read = read(fd, env_file, file_length);
+            if (bytes_read != file_length) {
+                fprintf(stderr, "Reading env file failed: %s", strerror(errno));
+                exit(1);
+            }
+            size_t entries = 0;
+            env_file[file_length] = 0;
+            for (int i = 0; i < file_length; i++) {
+                if (env_file[i] == '\n') {
+                    entries++;
+                }
+            }
+            if (env_file[file_length - 1] != '\n') {
+                fprintf(stderr, "No new line at end of file %s\n", env_path);
+                entries++;
+            }
+            char* envp[entries + 1];
+            int i = 0;
+            char* entry = NULL;
+            for (entry = strtok(env_file, "\n"); entry; i++, entry = strtok(NULL, "\n")) {
+                envp[i] = entry;
+            }
+            envp[entries] = NULL;
+            if (initgroups(pw->pw_name, pw->pw_gid) < 0) {
+                fprintf(stderr, "Failed to initialize groups: %s", strerror(errno));
+                exit(1);
+            }
+            if (setgid(pw->pw_gid) < 0) {
+                fprintf(stderr, "Failed to drop gid: %s\n", strerror(errno));
+                exit(1);
+            }
+            if (setuid(pw->pw_uid) < 0) {
+                fprintf(stderr, "Failed to drop uid: %s\n", strerror(errno));
+                exit(1);
+            }
+            char* argv[] = { S6_SVSCAN, dir, NULL };
+            fprintf(stderr, "pid=%d: ", getpid());
+            for (char** it = argv; *it; it++) {
+                fprintf(stderr, "%s ", *it);
+            }
+            fprintf(stderr, "\n");
+            struct sigaction action;
+            memset(&action, 0, sizeof(action));
+            action.sa_handler = SIG_DFL;
+            sigaction(SIGCHLD, &action, NULL);
+            sigaction(SIGTERM, &action, NULL);
+            sigaction(SIGINT, &action, NULL);
+            execve(S6_SVSCAN, argv, envp);
+        }
         fprintf(stderr, "Failed to execv: %s\n", strerror(errno));
         exit(1);
     }
@@ -111,7 +184,7 @@ static inline struct user* find_user_or_first_unused_by_uid(uid_t uid) {
 }
 
 void initalize_user(struct user* user, uid_t uid) {
-    fprintf(stderr, "initalizing user %d\n", uid);
+    fprintf(stderr, "Initalizing user %d\n", uid);
     user->uid = uid;
     // find disable file or service directory
     {

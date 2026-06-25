@@ -1,9 +1,26 @@
 #!/bin/bash
 
+bindir="/bin"
+libdir="/lib64"
+
+for arg; do
+    case "$arg" in
+        --bindir=*) bindir=${arg#*=} ;;
+        --libdir=*) libdir=${arg#*=} ;;
+    esac
+done
+
 S6_SVSCAN="$(which s6-svscan)"
 
 if [ -z "$S6_SVSCAN" ]; then
     echo "s6-svscan not found"
+    exit 1
+fi
+
+SU="$(which su)"
+
+if [ -z "$SU" ]; then
+    echo "su not found"
     exit 1
 fi
 
@@ -12,6 +29,14 @@ cat << EOT > config.h
 #define CONFIG_H_
 
 #define S6_SVSCAN "$S6_SVSCAN"
+#define S6_SVSCAN_LENGTH ${#S6_SVSCAN}
+#define SU "$SU"
+#define SU_LENGTH ${#SU}
 
 #endif // CONFIG_H_
+EOT
+
+cat << EOT > config.mak
+bindir := $bindir
+libdir := $libdir
 EOT
